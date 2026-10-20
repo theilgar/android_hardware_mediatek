@@ -10,7 +10,10 @@
 #include <health-impl/Health.h>
 #include <health/utils.h>
 
+#include <algorithm>
+
 #include <android-base/file.h>
+#include <android-base/parseint.h>
 #include <android-base/properties.h>
 #include <android-base/strings.h>
 
@@ -55,6 +58,9 @@ class MediatekHealth : public Health {
         if (mStaticUsbMax && health_info->chargerUsbOnline && IsStandardUsbPort()) {
             health_info->maxChargingCurrentMicroamps = kStandardUsbCurrentUa;
             health_info->maxChargingVoltageMicrovolts = kStandardUsbVoltageUv;
+        } else if (mStaticUsbMax &&
+                   (health_info->chargerAcOnline || health_info->chargerUsbOnline)) {
+            ReportNegotiatedPower(health_info);
         }
     }
 
@@ -73,11 +79,48 @@ class MediatekHealth : public Health {
         return ::android::base::Trim(type) == "USB";
     }
 
+    // The same drivers do classify the charger in quick_charge_type (0 normal, 1 fast, 2 flash,
+    // 3 turbo, 4 super) and report the negotiated adapter power in power_max (W). Map them to a
+    // power at a nominal 5 V for the framework's charging speed thresholds (AOSP: slow < 5 W,
+    // fast > 7.5 W): a plain 5 V charger stays at the regular-charging limit, PD/QC chargers
+    // report 18-25 W and only the vendor's turbo/super chargers report their full power.
+    static void ReportNegotiatedPower(HealthInfo* health_info) {
+        int qc, watts = 0;
+        if (!ReadInt(kUsbQuickChargeTypePath, &qc) || qc < 0) return;
+        ReadInt(kUsbPowerMaxPath, &watts);
+        if (qc >= kQuickChargeTurbo) {
+            watts = watts > 0 ? std::min(watts, kMaxTurboW) : kDefaultTurboW;
+        } else if (qc > 0) {
+            watts = std::clamp(watts > 0 ? watts : kDefaultFastW, kDefaultFastW, kMaxFastW);
+        } else {
+            health_info->maxChargingCurrentMicroamps = kRegularCurrentUa;
+            health_info->maxChargingVoltageMicrovolts = kStandardUsbVoltageUv;
+            return;
+        }
+        health_info->maxChargingCurrentMicroamps = watts * 1000000 / 5;
+        health_info->maxChargingVoltageMicrovolts = kStandardUsbVoltageUv;
+    }
+
+    static bool ReadInt(const char* path, int* value) {
+        std::string buf;
+        return ::android::base::ReadFileToString(path, &buf) &&
+               ::android::base::ParseInt(::android::base::Trim(buf), value);
+    }
+
     // No phone battery holds 100 Ah; anything below this is a mAh value.
     static constexpr int32_t kMaxPlausibleMah = 100000;
     static constexpr const char* kUsbRealTypePath = "/sys/class/power_supply/usb/real_type";
     static constexpr int32_t kStandardUsbCurrentUa = 500000;
     static constexpr int32_t kStandardUsbVoltageUv = 5000000;
+    static constexpr const char* kUsbQuickChargeTypePath =
+            "/sys/class/power_supply/usb/quick_charge_type";
+    static constexpr const char* kUsbPowerMaxPath = "/sys/class/power_supply/usb/power_max";
+    static constexpr int kQuickChargeTurbo = 3;
+    static constexpr int kDefaultTurboW = 33;
+    static constexpr int kMaxTurboW = 240;  // keeps watts * 1000000 / 5 in an int32_t
+    static constexpr int kDefaultFastW = 18;
+    static constexpr int kMaxFastW = 25;
+    static constexpr int32_t kRegularCurrentUa = 1500000;  // 7.5 W at 5 V: "Charging"
     const bool mScaleChargeCounter =
             ::android::base::GetBoolProperty("ro.vendor.health.charge_counter_in_mah", false);
     const bool mStaticUsbMax =
