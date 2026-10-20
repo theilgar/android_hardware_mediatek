@@ -10,6 +10,8 @@
 #include <health-impl/Health.h>
 #include <health/utils.h>
 
+#include <android-base/properties.h>
+
 #ifndef CHARGER_FORCE_NO_UI
 #define CHARGER_FORCE_NO_UI 0
 #endif
@@ -27,6 +29,40 @@ using aidl::android::hardware::health::charger::ChargerModeMain;
 #endif
 
 static constexpr const char* gInstanceName = "default";
+
+namespace aidl::android::hardware::health {
+// Some MTK fuel gauge drivers report POWER_SUPPLY_PROP_CHARGE_COUNTER in mAh instead of the
+// µAh Android expects (e.g. 2821 at 71% of a 4053 mAh battery), which leaves BatteryStats and
+// the Settings battery usage screen with a near-zero charge. Opt in per device with
+// ro.vendor.health.charge_counter_in_mah=true to scale it back to µAh.
+class MediatekHealth : public Health {
+  public:
+    using Health::Health;
+
+    // BatteryManager's BATTERY_PROPERTY_CHARGE_COUNTER reads the node directly, not HealthInfo.
+    ndk::ScopedAStatus getChargeCounterUah(int32_t* out) override {
+        auto status = Health::getChargeCounterUah(out);
+        if (status.isOk()) ScaleChargeCounter(out);
+        return status;
+    }
+
+  protected:
+    void UpdateHealthInfo(HealthInfo* health_info) override {
+        Health::UpdateHealthInfo(health_info);
+        ScaleChargeCounter(&health_info->batteryChargeCounterUah);
+    }
+
+  private:
+    void ScaleChargeCounter(int32_t* value) const {
+        if (mScaleChargeCounter && *value > 0 && *value < kMaxPlausibleMah) *value *= 1000;
+    }
+
+    // No phone battery holds 100 Ah; anything below this is a mAh value.
+    static constexpr int32_t kMaxPlausibleMah = 100000;
+    const bool mScaleChargeCounter =
+            ::android::base::GetBoolProperty("ro.vendor.health.charge_counter_in_mah", false);
+};
+}  // namespace aidl::android::hardware::health
 static constexpr std::string_view gChargerArg{"--charger"};
 
 #if !CHARGER_FORCE_NO_UI
@@ -47,7 +83,8 @@ int main(int argc, char** argv) {
     // make a default health service
     auto config = std::make_unique<healthd_config>();
     ::android::hardware::health::InitHealthdConfig(config.get());
-    auto binder = ndk::SharedRefBase::make<Health>(gInstanceName, std::move(config));
+    auto binder = ndk::SharedRefBase::make<aidl::android::hardware::health::MediatekHealth>(
+            gInstanceName, std::move(config));
 
     if (argc >= 2 && argv[1] == gChargerArg) {
 #if !CHARGER_FORCE_NO_UI
