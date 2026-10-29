@@ -147,6 +147,12 @@ int main(int argc, char** argv) {
     // make a default health service
     auto config = std::make_unique<healthd_config>();
     ::android::hardware::health::InitHealthdConfig(config.get());
+    // Some fuel gauges report the state of health in a node of their own instead of the battery
+    // power supply (e.g. Xiaomi bms/soh), so Settings > Device diagnostics showed none. Point the
+    // HAL at it with ro.vendor.health.state_of_health_path; BatteryMonitor keeps a path set here.
+    const std::string soh_path =
+            ::android::base::GetProperty("ro.vendor.health.state_of_health_path", "");
+    if (!soh_path.empty()) config->batteryStateOfHealthPath = soh_path.c_str();
     auto binder = ndk::SharedRefBase::make<aidl::android::hardware::health::MediatekHealth>(
             gInstanceName, std::move(config));
 
