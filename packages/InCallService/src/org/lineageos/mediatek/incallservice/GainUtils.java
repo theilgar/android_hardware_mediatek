@@ -25,6 +25,9 @@ public class GainUtils {
     private static final Handler sHandler = new Handler(Looper.getMainLooper());
     private static final Object sReapplyToken = new Object();
 
+    // Last Super Volume state sent to the HAL, null when unknown.
+    private static Boolean sSuperVolume;
+
     /**
      * Maps a STREAM_VOICE_CALL UI index (0..max) onto the HAL's 0..volSteps scale.
      */
@@ -71,13 +74,40 @@ public class GainUtils {
     }
 
     private static void applyCurrentGainOnce(AudioManager audioManager) {
-        int halIndex = toHalIndex(audioManager,
-                audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL));
+        int uiIndex = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL);
+        int halIndex = toHalIndex(audioManager, uiIndex);
         AudioDeviceInfo callDevice = audioManager.getCommunicationDevice();
+        // Switch Super Volume first: the HAL picks the gain table of the active speech profile
+        // when the volume is set, not when the profile changes.
+        setSuperVolume(audioManager.getMode() == AudioManager.MODE_IN_CALL
+                && callDevice != null
+                && callDevice.getType() == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                && uiIndex == audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL));
         if (callDevice != null) {
             setGainLevel(callDevice.getPort().type(), halIndex, AudioSystem.STREAM_VOICE_CALL);
         } else {
             setGainLevel(halIndex);
         }
+    }
+
+    /**
+     * Forgets the Super Volume state last sent to the HAL, so the next apply sends it again.
+     */
+    public static void resetSuperVolume() {
+        sSuperVolume = null;
+    }
+
+    /**
+     * Switches the MTK speech Super Volume profile. Stock HyperOS turns it on in calls on the
+     * earpiece with an extra volume up press at the top step; here it follows the top step.
+     */
+    private static void setSuperVolume(boolean enabled) {
+        if (sSuperVolume != null && sSuperVolume == enabled) {
+            return;
+        }
+        sSuperVolume = enabled;
+        String parameters = "SET_SUPER_VOLUME=" + (enabled ? 1 : 0);
+        Log.d(LOG_TAG, "Setting audio parameters to: " + parameters);
+        AudioSystem.setParameters(parameters);
     }
 }
