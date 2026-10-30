@@ -52,6 +52,14 @@ public class VolumeChangeService extends Service {
 
         telephonyManager.registerTelephonyCallback(getMainExecutor(), mCallStateListener);
 
+        // Once a call moves to another device, the HAL rejects the framework's setVoiceVolume()
+        // and keeps the previous device's gain (the earpiece's 0 dB crackles on the speaker),
+        // so send the volume for the new device.
+        audioManager.addOnCommunicationDeviceChangedListener(getMainExecutor(), device -> {
+            Log.d(LOG_TAG, "Communication device changed, setting gain.");
+            GainUtils.applyCurrentGain(audioManager);
+        });
+
         return START_STICKY;
     }
 }
